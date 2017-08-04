@@ -130,14 +130,19 @@ def create_guest_account(_name, expdate):
     if not verify_entry(accountid, guest_password, key):
         raise ValueError("Password in database not the same as it should be.")
 
-    return_message = "Der Gastaccount <b>" + accountname + "</b> wird in den nächsten 7 Tagen erstellt<br> für <b>" + _name
-    return_message += "</b> bis zum <b>" + expdate.strftime('%d.%m.%Y') + "</b><br>"
-    return_message += "mit dem Passwort <b>" + guest_password.strip('\x00') + "</b>"
+    return_message  = "Der Gastaccount <b>{accountname}</b> wird in den nächsten 7 Tagen <br>"
+    return_message += "mit dem Ablaufdatum <b>{date}</b><br>"
+    return_message += "und dem Passwort <b>{password}</b> erstellt.<br>"
+    return_message += "Bitte teilen Sie <b>{name}</b> die obigen Daten mit."
 
     # User was created successfully in the database, so wen can trigger sendmail here
     send_mail(_name, accountname)
 
-    return return_message
+    return return_message.format(accountname=accountname,
+                                 name=_name,
+                                 date=expdate.strftime('%d.%m.%Y'),
+                                 password=guest_password.strip('\x00')
+                                )
 
 
 def initialize_app():
