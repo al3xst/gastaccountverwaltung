@@ -4,59 +4,42 @@ from email.mime.text import MIMEText  # sendmail
 
 from Crypto.Cipher import AES
 
-import datetime
+from datetime import date, datetime, timedelta
 import html  # html escape
 import os # to capture env vars
 import random  # pwgen
 import smtplib  # sendmail
 import sqlalchemy  # psql connection
 import string
+from base64 import b64encode, b64decode
+import sys
 
-#  aes key, generated with  get_random_bytes(30)
+# TODO create an account class - results in an sqlalchemy improvement
 
+if "DEBUG" in os.environ:
+    DEBUG=True
+else:
+    DEBUG=False
 
-mailto = ""
-mailfrom = ""
-FLASK_PORT = 5003  # change, so no conflicts arise with other running flask apps
-
-
-print("*** ============= ***")
-print("Mails will be sent to: ")
-print(mailto)
-print("*** ============= ***")
-print()
-
-try:
-    key = os.environ["GASTACCKEY"].encode()
-except KeyError:
-    # TODO UNCOMMENT IN PRODUCTION!!
-    # print("ENV Variable 'GASTACCKEY' not set. Exiting program.")
-    # raise
-    print("*** ==================== ***")
-    print("*** USING DEV AES KEY!!! ***")
-    print("*** ==================== ***")
-    print()
-    key = b'R\xc9P 9\xba\x96b\xc5\xe94`\xfb\xcf\xb6OlR\x11D\xe2\xf3\xeal'
-
-app = Flask(__name__)
-
-
-def connect():
-    # Returns a connection and a metadata object
+# receives environment variables
+def get_env_variable(varname, *, default=None, defaulttext=None, check_debug=True):
     try:
-        url = os.environ["GASTACCPSQL"]
+        value = os.environ[varname]
     except KeyError:
-        # print("ENV Variable 'GASTACCPSQL' not set. Exiting program.")
-        # raise
-        # TODO UNCOMMENT IN PRODUCTION!!
-        print("*** ==================== ***")
-        print("*** USING DEV PSQL URL!!! ***")
-        print("*** ==================== ***")
-        print()
-        url = 'postgresql://guestaccounts@localhost/guestaccounts'
+        if default == None or (check_debug and not DEBUG):
+            print("ENV Variable '{}' not set. Exiting program.".format(varname))
+            sys.exit(1)
+        else:
+            if defaulttext: print("   "+defaulttext)
+            value = default
+    if DEBUG: print("{:20} {}".format(varname+":", value))
+    return value
 
+
+# Returns a connection and a metadata object
+def connect():
     # The return value of create_engine() is our connection object
-    con = sqlalchemy.create_engine(url, client_encoding='utf8')
+    con = sqlalchemy.create_engine(sql_url, client_encoding='utf8')
 
     # We then bind the connection to MetaData()
     meta = sqlalchemy.MetaData(bind=con, reflect=True)
@@ -65,143 +48,182 @@ def connect():
 
 
 def genPassword(_pwlen = 8):
-
     chars = string.ascii_letters[:] + "".join([str(x) for x in range(10)])
 
     result = ""
     for _ in range(_pwlen):
         result += random.choice(chars)
 
+    # password has to be divided by 16 when using AES
+    while not len(result)%16 == 0:
+        result += '\x00'
+
     return result
 
 
-def sendMail(_name, _accname):
-
+def send_mail(_name, _accname):
     mailbody = "Lieber Admin!\n\nBitte erneuere den Gastaccount {} für {}.".format(_accname, _name)
     mailbody += "\nBitte benutze dafür das Script, was sich die dazugehörigen Daten (Passwort + Ablaufdatum) " \
                 "automatisch aus der Datenbank holt." \
                 "\n\nDeine Gastaccountverwaltung"
 
     msg = MIMEText(mailbody)
-
     msg['Subject'] = "Gastaccount für " +_accname
     msg['From'] = mailfrom
     msg['To'] = mailto
 
-    s = smtplib.SMTP('localhost')
+    s = smtplib.SMTP(smtphost)
     s.send_message(msg)
     s.quit()
 
 
-def decrypt(ciphertext):
-    IV = 16 *'\x00'
+def encrypt(plaintext, key):
+    IV = 16*'\x00'
+    cipher = AES.new(key, AES.MODE_CBC, IV)
+    return cipher.encrypt(plaintext)
+
+
+def decrypt(ciphertext, key):
+    IV = 16*'\x00'
     cipher = AES.new(key, AES.MODE_CBC, IV)
     return cipher.decrypt(ciphertext)
 
 
-def createGuestAccount(_name, _date):
+def verify_entry(accountid, guest_password, key):
+    accounts = meta.tables["accounts"].c
+    dbselect = meta.tables["accounts"].select().where(accounts.id == accountid)
+
+    test_decrypted_pw = decrypt(b64decode(con.execute(dbselect).fetchone()['password']), key).decode()
+    return test_decrypted_pw == guest_password
+
+
+def createGuestAccount(_name, expdate):
 
     # establish connection to database
     con, meta = connect()
     # check if we have free guest accounts (results = (... state == "active" AND expdate < date.today()))
     accounts = meta.tables["accounts"].c
     sel = meta.tables["accounts"].select().\
-        where((accounts.state == "active") & (accounts.expdate < datetime.date.today()))
+        where((accounts.state == "active") & (accounts.expdate < date.today()))
 
     # assign free guest accounts (results[0]) #take the first one
     # try except, because we can have 0 available accounts
     try:
         firstEntry = list(con.execute(sel).fetchone())
         accountid = firstEntry[0]  # get id of the first result from the query
-        accoutnname = firstEntry[1]
+        accountname = firstEntry[1]
     except:
         return ""
 
     # generate new random password for guest account
+    guest_password = genPassword()
+    guest_password_enc = encrypt(guest_password, key)
 
-    guestpassword = genPassword()  # using default len of 10 chars
-    guestpwEnc = guestpassword #.encode("utf-8")
-    IV = 16*'\x00'
-    print(type(key))
-    cipher = AES.new(key, AES.MODE_CBC, IV)
-    guestpasswordEnc = cipher.encrypt(guestpwEnc)
-
-    print(decrypt(guestpasswordEnc))
-    print(guestpwEnc)
-
-    # change date+7
-    date_1 = datetime.datetime.strptime(_date, "%Y-%m-%d")
-    expdate = date_1 + datetime.timedelta(days=7)
+    # increment date by 7 days
+    real_expdate = expdate + timedelta(days=7)
 
     # change state of guest account to todo
     # generate update query with new information
     dbupdate = meta.tables["accounts"].update().\
         where(accounts.id == accountid).\
-        values({'name': _name, 'expdate': expdate, 'password': guestpasswordEnc, 'state': 'todo'})
+        values({'name': _name, 'expdate': real_expdate, 'password': b64encode(guest_password_enc).decode(), 'state': 'todo'})
 
     # execute query
     con.execute(dbupdate)
 
-    rtrnMsg = "Der Gastaccount <b>" + accoutnname + "</b> wird in den nächsten 7 Tagen erstellt<br> für <b>" + _name
-    rtrnMsg += "</b> bis zum <b>" + _date + "</b><br> mit dem Passwort <b>"+guestpassword+"</b>"
+    # test if password in database is correct
+    if not verify_entry(accountid, guest_password, key):
+        raise ValueError("Password in database not the same as it should be.")
+
+    return_message = "Der Gastaccount <b>" + accountname + "</b> wird in den nächsten 7 Tagen erstellt<br> für <b>" + _name
+    return_message += "</b> bis zum <b>" + expdate.strftime('%d.%m.%Y') + "</b><br>"
+    return_message += "mit dem Passwort <b>" + guest_password.strip('\x00') + "</b>"
 
     # User was created successfully in the database, so wen can trigger sendmail here
-    sendMail(_name, accoutnname)
+    send_mail(_name, accountname)
 
-    return rtrnMsg
-
-
-@app.route("/")
-def main():
-
-    return render_template('index.html')
+    return return_message
 
 
-@app.route("/signUp", methods=['POST'])
-def signUp():
+def initialize_app():
+    app = Flask(__name__)
 
-    _name = request.form['inputName']
-    _date = request.form['inputDate']
+    @app.route("/")
+    def index():
+        return render_template('index.html')
 
-    # sanitize _name and _date!
-    _name = html.escape(_name)
-    _date = html.escape(_date)
+    @app.route("/sign_up", methods=['POST'])
+    def sign_up():
+        _name = request.form['inputName']
+        _date = request.form['inputDate']
 
-    # check if _name and _date are valid (not null)
-    if _name == "" or _date == "":
-        return json.dumps({'error': 'Bitte Name und Datum eintragen!'}), 500
+        # sanitize _name and _date!
+        _name = html.escape(_name)
+        _date = html.escape(_date)
 
-    account = createGuestAccount(_name, _date)
+        # check if _name and _date are not null
+        if _name == "" or _date == "":
+            return json.dumps({'error': 'Bitte Name und Datum eintragen!'}), 500
 
-    if account == "":
-        return json.dumps({'error': 'Es sind keine Gästeaccounts zur Zeit frei.<br> Bitte kontaktieren sie einen Admin!',
-                           'actn': 'disableBtn'}), 500
+        try:
+            _date = datetime.strptime(_date, "%Y-%m-%d")
+        except ValueError as e:
+            return json.dumps({'error': str(e)}), 500
 
-    return json.dumps({'message': account})
+        if _date < datetime.now():
+            return json.dumps({'error': 'Bitte ein Datum in der Zukunft eintragen!'}), 500
+
+        account = createGuestAccount(_name, _date)
+
+        if account == "":
+            return json.dumps({'error': 'Es sind keine Gästeaccounts zur Zeit frei.<br>' +
+                                        'Bitte kontaktieren sie einen ' +
+                                        '<a href="{}" target="_blank">Admin</a>!'.format(admin_url),
+                               'actn': 'disableBtn'}), 500
+
+        if DEBUG:
+            print("\nValues after successful update")
+            from pprint import pprint
+            pprint(list(con.execute(meta.tables["accounts"].select()).fetchall()))
+
+        return json.dumps({'message': account})
+
+    return app
 
 
 if __name__ == "__main__":
+    mailto = get_env_variable("GUEST_MAIL_TO")
+    mailfrom = get_env_variable("GUEST_MAIL_FROM")
+    smtphost = get_env_variable("GUEST_SMTP_HOST", default="localhost")
+    flask_port = get_env_variable("GUEST_FLASK_PORT", default=5003, check_debug=False)
+    admin_url = get_env_variable("GUEST_ADMIN_URL", default="", check_debug=False)
+    sql_url = get_env_variable("GUEST_SQL_URL",
+                               default='postgresql://guestaccounts@localhost/guestaccounts',
+                               defaulttext="Using dev PSQL URL")
+    key = get_env_variable("GUEST_KEY",
+                           default = b'R\xc9P 9\xba\x96b\xc5\xe94`\xfb\xcf\xb6OlR\x11D\xe2\xf3\xeal',
+                           defaulttext="Using dev AES key")
 
+    # TODO create another script that (re)initializes the database
+    # reset db entry
     con, meta = connect()
+    con.execute(meta.tables["accounts"].delete())
+    for i in range(10):
+        con.execute(
+            meta.tables["accounts"].insert().\
+            values({'id': i,
+                    'accountname': 'guest{:02}'.format(i),
+                    'name': None,
+                    'expdate': date.today()-timedelta(days=1),
+                    'password': None,
+                    'state': 'active'})
+        )
 
-    #reset db entry
-    accounts = meta.tables["accounts"].c
-    dbupdate = meta.tables["accounts"].update().\
-        where(accounts.id == 0).\
-        values({'name': "Alex S", 'expdate': "2015-7-6", 'password': "asdf", 'state': 'active'})
-    con.execute(dbupdate)
+    if DEBUG:
+        print("\nInitial Values at app startup")
+        from pprint import pprint
+        pprint(list(con.execute(meta.tables["accounts"].select()).fetchall()))
 
-    # query = meta.tables["accounts"].insert().values(id = 0,
-    #                                                 accountname='testacc',
-    #                                                 name='Alex S',
-    #                                                 expdate='2017-07-06',
-    #                                                 password='totalsecret',
-    #                                                 state='todo')
-    #
-    #con.execute(query)
-
-    for row in con.execute(meta.tables["accounts"].select()):
-        print(row)
-    print(list(con.execute(meta.tables["accounts"].select()).fetchone())[0])
-
-    app.run(port=FLASK_PORT)
+    # initialize flask
+    app = initialize_app()
+    app.run(port=flask_port)
