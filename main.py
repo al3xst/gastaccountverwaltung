@@ -1,18 +1,15 @@
 from flask import Flask, json, render_template, request
-
-from email.mime.text import MIMEText  # sendmail
-
-from Crypto.Cipher import AES
-
 from datetime import date, datetime, timedelta
-import html  # html escape
-import os # to capture env vars
-import random  # pwgen
-import smtplib  # sendmail
-import sqlalchemy  # psql connection
-import string
 from base64 import b64encode, b64decode
+from email.mime.text import MIMEText
+from Crypto.Cipher import AES
+import sqlalchemy
+import smtplib
+import random
+import string
+import html
 import sys
+import os
 
 # TODO create an account class - results in an sqlalchemy improvement
 
@@ -20,6 +17,7 @@ if "DEBUG" in os.environ:
     DEBUG=True
 else:
     DEBUG=False
+
 
 # receives environment variables
 def get_env_variable(varname, *, default=None, defaulttext=None, check_debug=True):
@@ -37,17 +35,15 @@ def get_env_variable(varname, *, default=None, defaulttext=None, check_debug=Tru
 
 
 # Returns a connection and a metadata object
-def connect():
+def sql_connect():
     # The return value of create_engine() is our connection object
     con = sqlalchemy.create_engine(sql_url, client_encoding='utf8')
-
     # We then bind the connection to MetaData()
     meta = sqlalchemy.MetaData(bind=con, reflect=True)
-
     return con, meta
 
 
-def genPassword(_pwlen = 8):
+def generate_password(_pwlen = 8):
     chars = string.ascii_letters[:] + "".join([str(x) for x in range(10)])
 
     result = ""
@@ -69,10 +65,10 @@ def send_mail(_name, _accname):
 
     msg = MIMEText(mailbody)
     msg['Subject'] = "Gastaccount für " +_accname
-    msg['From'] = mailfrom
-    msg['To'] = mailto
+    msg['From'] = mail_from
+    msg['To'] = mail_to
 
-    s = smtplib.SMTP(smtphost)
+    s = smtplib.SMTP(smtp_host)
     s.send_message(msg)
     s.quit()
 
@@ -97,10 +93,9 @@ def verify_entry(accountid, guest_password, key):
     return test_decrypted_pw == guest_password
 
 
-def createGuestAccount(_name, expdate):
-
+def create_guest_account(_name, expdate):
     # establish connection to database
-    con, meta = connect()
+    con, meta = sql_connect()
     # check if we have free guest accounts (results = (... state == "active" AND expdate < date.today()))
     accounts = meta.tables["accounts"].c
     sel = meta.tables["accounts"].select().\
@@ -116,7 +111,7 @@ def createGuestAccount(_name, expdate):
         return ""
 
     # generate new random password for guest account
-    guest_password = genPassword()
+    guest_password = generate_password()
     guest_password_enc = encrypt(guest_password, key)
 
     # increment date by 7 days
@@ -161,20 +156,19 @@ def initialize_app():
         _name = html.escape(_name)
         _date = html.escape(_date)
 
-        # check if _name and _date are not null
-        if _name == "" or _date == "":
-            return json.dumps({'error': 'Bitte Name und Datum eintragen!'}), 500
-
+        # check if _name and _date are not null and date as valid
+        if _name == "":
+            return json.dumps({'error': 'Bitte Name eintragen!'}), 500
+        if _date == "":
+            return json.dumps({'error': 'Bitte Datum eintragen!'}), 500
         try:
             _date = datetime.strptime(_date, "%Y-%m-%d")
+            if _date < datetime.now():
+                return json.dumps({'error': 'Bitte ein Datum in der Zukunft eintragen!'}), 500
         except ValueError as e:
             return json.dumps({'error': str(e)}), 500
 
-        if _date < datetime.now():
-            return json.dumps({'error': 'Bitte ein Datum in der Zukunft eintragen!'}), 500
-
-        account = createGuestAccount(_name, _date)
-
+        account = create_guest_account(_name, _date)
         if account == "":
             return json.dumps({'error': 'Es sind keine Gästeaccounts zur Zeit frei.<br>' +
                                         'Bitte kontaktieren sie einen ' +
@@ -192,9 +186,10 @@ def initialize_app():
 
 
 if __name__ == "__main__":
-    mailto = get_env_variable("GUEST_MAIL_TO")
-    mailfrom = get_env_variable("GUEST_MAIL_FROM")
-    smtphost = get_env_variable("GUEST_SMTP_HOST", default="localhost")
+    # get all environment variables
+    mail_to = get_env_variable("GUEST_MAIL_TO")
+    mail_from = get_env_variable("GUEST_MAIL_FROM")
+    smtp_host = get_env_variable("GUEST_SMTP_HOST", default="localhost")
     flask_port = get_env_variable("GUEST_FLASK_PORT", default=5003, check_debug=False)
     admin_url = get_env_variable("GUEST_ADMIN_URL", default="", check_debug=False)
     sql_url = get_env_variable("GUEST_SQL_URL",
@@ -206,7 +201,7 @@ if __name__ == "__main__":
 
     # TODO create another script that (re)initializes the database
     # reset db entry
-    con, meta = connect()
+    con, meta = sql_connect()
     con.execute(meta.tables["accounts"].delete())
     for i in range(10):
         con.execute(
