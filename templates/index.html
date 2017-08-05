@@ -6,8 +6,18 @@
 
     <link href="../static/css/bootstrap.min.css" rel="stylesheet">
     <link href="../static/css/jumbotron-narrow.css" rel="stylesheet">
+    <link href="../static/css/jquery-ui-1.12.1.css" rel="stylesheet">
     <script src="../static/js/jquery-3.2.1.min.js"></script>
     <script src="../static/js/sign_up.js"></script>
+    <script src="../static/js/jquery-ui-1.12.1.js"></script>
+    <script>
+        if(navigator.userAgent.toLowerCase().indexOf('firefox') > -1) {
+            // Do Firefox-related activities
+            $(function () {
+                $("#inputDate").datepicker({dateFormat: "yy-mm-dd"});
+            });
+        }
+    </script>
 
   </head>
 
